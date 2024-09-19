@@ -15,13 +15,16 @@ TODO: Add more details about how to compile on Linux.
 
 ## Verbosity
 
-The following arguments can be supplied to control verbosity:
+The `-v<VERBOSITY LEVEL>` argument can be supplied to control verbosity:
 
 - `-v0`: Silence (default)
 - `-v1`: Print initialization and error messages, as well as device information, registration, and unregistration
 - `-v2`: Print statistics periodically
-- `-v3`: Print all raw HID messages that start with `RAW_HID_HUB_COMMAND_ID`
-- `-v4`: Print all raw HID messages
+- `-v4`: Print all raw HID messages to and from the hub
+- `-v8`: Print all raw HID messages between devices
+- `-v16`: Print all raw HID messages that the hub is ignoring
+
+These options can be combined by adding the respective numbers together. For example, `-v12` would print raw HID messages to and from the hub, as well as between devices.
 
 ## Reports
 

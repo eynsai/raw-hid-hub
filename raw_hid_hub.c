@@ -111,7 +111,11 @@ typedef struct raw_hid_message_counter_t {
 // GLOBAL VARIABLES
 // ============================================================================
 
-int verbose = false;
+int verbose_basic = false;
+int verbose_stats = false;
+int verbose_hub = false;
+int verbose_device = false;
+int verbose_discard = false;
 raw_hid_node_t* raw_hid_nodes = NULL;  // root of the linked list of opened devices
 int n_registered_devices = 0;
 int next_unassigned_device_id = 1;
@@ -184,7 +188,7 @@ void message_counter_free_all(void) {
 }
 
 void maybe_print_and_update_stats() {
-    if (verbose < 2) {
+    if (verbose_stats == false) {
         return;
     }
     iters_since_last_stats++;
@@ -334,7 +338,7 @@ int register_node(raw_hid_node_t* node) {
         return 0;
     }
     if (n_registered_devices == MAX_REGISTERED_DEVICES) {
-        if (verbose > 0) {
+        if (verbose_basic == true) {
             printf("Too many registered devices.\n");
         }
         return -1;
@@ -346,7 +350,7 @@ int register_node(raw_hid_node_t* node) {
     }
     assigned_device_ids[n_registered_devices] = node->device_id;
     n_registered_devices += 1;
-    if (verbose > 0) {
+    if (verbose_basic == true) {
         printf("Device was registered with ID: 0x%02hx\n", node->device_id);
     }
     return 0;
@@ -356,7 +360,7 @@ void unregister_node(raw_hid_node_t* node) {
     if (node->device_id == DEVICE_ID_UNASSIGNED) {
         return;
     }
-    if (verbose > 0) {
+    if (verbose_basic == true) {
         printf("Device with ID 0x%02hx was unregistered.\n", node->device_id);
     }
     message_queue_clear(node->device_id);
@@ -435,7 +439,7 @@ void enumerate_raw_hid_devices(void) {
     while (current_device_info != NULL) {
         if (current_device_info->usage_page == QMK_RAW_HID_USAGE_PAGE && current_device_info->usage == QMK_RAW_HID_USAGE) {
             result = handle_raw_hid_device_found(current_device_info->path);	
-            if (verbose > 0 && result == 1) {
+            if (verbose_basic == true && result == 1) {
                 printf("Opened a new raw HID device:\n");
                 print_device_info(current_device_info);
             }
@@ -449,7 +453,7 @@ void enumerate_raw_hid_devices(void) {
     while (current_node != NULL) {
         if (current_node->is_in_enumeration == false) {
             handle_raw_hid_device_missing(current_node->path);
-            if (verbose > 0) {
+            if (verbose_basic == true) {
                 printf("Closed a missing raw HID device.\n");
             }
         }
@@ -469,20 +473,20 @@ void communicate_with_raw_hid_device(raw_hid_node_t* node) {
     unsigned char destination_device_id;
     while (bytes_read > 0) {
         if (buffer_data[0] != RAW_HID_HUB_COMMAND_ID) {
-            if (verbose > 3) {
+            if (verbose_discard == true) {
                 printf("Discarding:          ");
                 print_buffer();
             }
             goto next_hid_read;
         } else {
-            if (verbose > 2) {
+            if ((verbose_hub == true && buffer_data[1] == DEVICE_ID_HUB)) {
                 printf("Receiving from 0x%02hx: ", node->device_id);
                 print_buffer();
             }
 
             // registration report
             if (buffer_data[1] == DEVICE_ID_HUB && buffer_data[2] == 0x01) {
-                if (verbose > 1) {
+                if (verbose_stats == true) {
                     message_counter_increment(node->device_id, DEVICE_ID_HUB);
                 }
                 result = register_node(node);
@@ -498,7 +502,7 @@ void communicate_with_raw_hid_device(raw_hid_node_t* node) {
                             }
                         }
                         message_queue_push(destination_device_id, buffer_data);
-                        if (verbose > 1) {
+                        if (verbose_stats == true) {
                             message_counter_increment(DEVICE_ID_HUB, destination_device_id);
                         }
                     }
@@ -513,7 +517,7 @@ void communicate_with_raw_hid_device(raw_hid_node_t* node) {
                         }
                     }
                     message_queue_push(destination_device_id, buffer_data);
-                    if (verbose > 1) {
+                    if (verbose_stats == true) {
                         message_counter_increment(DEVICE_ID_HUB, destination_device_id);
                     }
                 }
@@ -527,7 +531,7 @@ void communicate_with_raw_hid_device(raw_hid_node_t* node) {
 
             // unregistration report
             if (buffer_data[1] == DEVICE_ID_HUB && buffer_data[2] == 0x00) {
-                if (verbose > 1) {
+                if (verbose_stats == true) {
                     message_counter_increment(node->device_id, DEVICE_ID_HUB);
                 }
                 unregister_node(node);
@@ -542,7 +546,7 @@ void communicate_with_raw_hid_device(raw_hid_node_t* node) {
                         }
                     }
                     message_queue_push(destination_device_id, buffer_data);
-                    if (verbose > 1) {
+                    if (verbose_stats == true) {
                         message_counter_increment(DEVICE_ID_HUB, destination_device_id);
                     }
                 }
@@ -557,7 +561,7 @@ void communicate_with_raw_hid_device(raw_hid_node_t* node) {
                 }
                 buffer_data[1] = node->device_id;
                 message_queue_push(destination_device_id, buffer_data);
-                if (verbose > 1) {
+                if (verbose_stats == true) {
                     message_counter_increment(node->device_id, destination_device_id);
                 }
 #if (defined(_WIN32) && defined(USE_SMART_SLEEP_WINDOWS)) || (!defined(_WIN32) && defined(USE_SMART_SLEEP_POSIX))
@@ -575,7 +579,7 @@ next_hid_read:
     // send to device
     while (device_id_message_queue[node->device_id] != NULL) {
         message_queue_pop(node->device_id, buffer_data);
-        if (verbose > 2) {
+        if ((verbose_hub == true && buffer_data[1] == DEVICE_ID_HUB) || (verbose_device == true && buffer_data[1] != DEVICE_ID_HUB)) {
             printf("Sending to 0x%02hx:     ", node->device_id);
             print_buffer();
         }
@@ -606,7 +610,7 @@ void cleanup() {
     message_queue_clear_all();
     message_counter_free_all();
     hid_exit();
-    if (verbose > 0) {
+    if (verbose_basic == true) {
         printf("Cleanup completed.\n");
     }
 }
@@ -619,8 +623,36 @@ void signal_handler(int signal) {
 int main(int argc, char* argv[])
 {
     // crude parser for verbose argument
+    uint8_t verbose = 0;
     if (argc > 1 && strncmp(argv[1], "-v", 2) == 0) {
-        verbose = argv[1][2] - '0';
+        verbose = atoi(&argv[1][2]);
+    }
+    if (verbose > 0) {
+        printf("Verbose:\n");
+        if (verbose % 2 == 1) {
+            verbose_basic = true;
+            printf("  Printing basic status messages.\n");
+        }
+        verbose /= 2;
+        if (verbose % 2 == 1) {
+            verbose_stats = true;
+            printf("  Printing stats.\n");
+        }
+        verbose /= 2;
+        if (verbose % 2 == 1) {
+            verbose_hub = true;
+            printf("  Printing messages to and from the hub.\n");
+        }
+        verbose /= 2;
+        if (verbose % 2 == 1) {
+            verbose_device = true;
+            printf("  Printing messages between registered devices.\n");
+        }
+        verbose /= 2;
+        if (verbose % 2 == 1) {
+            verbose_discard = true;
+            printf("  Printing discarded reports.\n");
+        }
     }
 
     // register signal handler for termination signals
@@ -637,7 +669,7 @@ int main(int argc, char* argv[])
 #if defined(__APPLE__) && HID_API_VERSION >= HID_API_MAKE_VERSION(0, 12, 0)
     hid_darwin_set_open_exclusive(0);
 #endif
-    if (verbose > 0) {
+    if (verbose_basic == true) {
         printf("HIDAPI initialization successful.\n");
     }
 
