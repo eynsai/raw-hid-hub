@@ -12,6 +12,7 @@
 #    include <windows.h>
 #else
 #    include <time.h>
+#    include <unistd.h>
 #endif
 
 // ============================================================================
@@ -62,7 +63,7 @@
 // HIDAPI
 // ============================================================================
 
-#include <hidapi.h>
+#include <hidapi/hidapi.h>
 
 #ifndef HID_API_MAKE_VERSION
 #define HID_API_MAKE_VERSION(mj, mn, p) (((mj) << 24) | ((mn) << 8) | (p))
@@ -72,15 +73,15 @@
 #endif
 
 #if defined(__APPLE__) && HID_API_VERSION >= HID_API_MAKE_VERSION(0, 12, 0)
-#include <hidapi_darwin.h>
+#include <hidapi/hidapi_darwin.h>
 #endif
 
 #if defined(_WIN32) && HID_API_VERSION >= HID_API_MAKE_VERSION(0, 12, 0)
-#include <hidapi_winapi.h>
+#include <hidapi/hidapi_winapi.h>
 #endif
 
 #if defined(USING_HIDAPI_LIBUSB) && HID_API_VERSION >= HID_API_MAKE_VERSION(0, 12, 0)
-#include <hidapi_libusb.h>
+#include <hidapi/hidapi_libusb.h>
 #endif
 
 // ============================================================================
@@ -140,9 +141,9 @@ void update_current_time_ms() {
 #ifdef _WIN32
     current_time_ms = (uint64_t)GetTickCount64();
 #else
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    current_time_ms = (uint64_t)(tv.tv_sec) * 1000 + (uint64_t)(tv.tv_usec) / 1000;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    current_time_ms = (uint64_t)(ts.tv_sec) * 1000 + (uint64_t)(ts.tv_nsec) / 1000000;
 #endif
 }
 
@@ -198,7 +199,7 @@ void maybe_print_and_update_stats() {
     }
     float delta_time_seconds = delta_time_ms / 1000.0;
     raw_hid_message_counter_t* current_counter = message_counters;
-    printf("Main loop ran %lld times (%.2f per second).\n", iters_since_last_stats, iters_since_last_stats / delta_time_seconds);
+    printf("Main loop ran %llu times (%.2f per second).\n", (unsigned long long)iters_since_last_stats, iters_since_last_stats / delta_time_seconds);
     printf("Message counts:\n");
     while (current_counter != NULL) {
         printf("  [0x%02hx -> 0x%02hx]: %4d (%7.2f per second).\n", current_counter->origin_device_id, current_counter->destination_device_id, current_counter->count, current_counter->count / delta_time_seconds);

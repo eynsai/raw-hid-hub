@@ -7,11 +7,9 @@ This C script runs on your computer, acting as a switchboard that passes raw HID
 This program should work on Windows, Linux, and MacOS.
 [HIDAPI](https://github.com/libusb/hidapi) is required for compilation.
 
-To compile with Windows Powershell, place the prebuilt windows HIDAPI binaries in the same directory as `raw_hid_hub.c` and run `cl raw_hid_hub.c -O2 /I"." /link "./hidapi.lib"`.
+To compile with Windows Powershell, download the latest compiled release of HIDAPI binaries and place the files in `raw-hid-hub/hidapi`. Then run `cl raw_hid_hub.c -O2 /I"." /link "./hidapi.lib"`.
 
-TODO: Add a windows .exe release.
-
-TODO: Add more details about how to compile on Linux.
+To compile on Linux, install HIDAPI first. Then run `gcc -o raw-hid-hub raw-hid-hub.c -lhidapi-hidraw`.
 
 ## Verbosity
 
