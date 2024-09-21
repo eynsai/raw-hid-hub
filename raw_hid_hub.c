@@ -5,12 +5,18 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <wchar.h>
 
 #ifdef _WIN32
+#    include <process.h>
 #    include <windows.h>
 #else
+#    include <fcntl.h>
+#    include <semaphore.h>
+#    include <sys/types.h>
+#    include <sys/wait.h>
 #    include <time.h>
 #    include <unistd.h>
 #endif
@@ -33,11 +39,14 @@
 #define USE_SLEEP_WINDOWS
 #define USE_SMART_SLEEP_WINDOWS 
 #define SLEEP_MILLISECONDS_WINDOWS 1  // actual sleep duration depends on timer precision
-#define SMART_SLEEP_WAIT_MILLISECONDS_WINDOWS 200
+#define SMART_SLEEP_WAIT_MILLISECONDS_WINDOWS 100
 #define USE_SLEEP_POSIX
 #define USE_SMART_SLEEP_POSIX
 #define SLEEP_MICROSECONDS_POSIX 4167
-#define SMART_SLEEP_WAIT_MILLISECONDS_POSIX 200
+#define SMART_SLEEP_WAIT_MILLISECONDS_POSIX 100
+
+// control speed of the child loop
+#define SECONDS_PER_ENUMERATION 1
 
 // ============================================================================
 // MACROS
@@ -93,7 +102,9 @@ typedef struct raw_hid_node_t {
     char* path;
     int device_id;
     int is_in_enumeration;
-    struct raw_hid_node_t* next;
+    atomic_int is_marked_for_unregistration;  // only set by child
+    atomic_int is_marked_for_deletion;  // only set by parent
+    _Atomic(struct raw_hid_node_t*) next;  // only set by child
 } raw_hid_node_t;
 
 typedef struct raw_hid_message_t {
@@ -112,26 +123,31 @@ typedef struct raw_hid_message_counter_t {
 // GLOBAL VARIABLES
 // ============================================================================
 
-int verbose_basic = false;
-int verbose_stats = false;
-int verbose_hub = false;
-int verbose_device = false;
-int verbose_discard = false;
-raw_hid_node_t* raw_hid_nodes = NULL;  // root of the linked list of opened devices
+atomic_int main_loop_new_iteration_flag = false;
+atomic_int child_termination_flag = false;
+
+_Atomic(raw_hid_node_t*) raw_hid_nodes = NULL;  // only set by child
 int n_registered_devices = 0;
 int next_unassigned_device_id = 1;
-raw_hid_message_t* device_id_message_queue[N_UNIQUE_DEVICE_IDS];  // roots of linked lists of outgoing messages
-raw_hid_message_counter_t* message_counters = NULL;
-uint64_t iters_since_last_stats = 0;
 
 // initialized in main
 int device_id_is_assigned[N_UNIQUE_DEVICE_IDS];
 unsigned char assigned_device_ids[MAX_REGISTERED_DEVICES];
+raw_hid_message_t* device_id_message_queue[N_UNIQUE_DEVICE_IDS];
 unsigned char buffer_report_id_and_data[QMK_RAW_HID_REPORT_SIZE + 1];
 unsigned char* buffer_data;
 uint64_t current_time_ms;
 uint64_t last_stats_time_ms;
 uint64_t last_message_time_ms;
+
+// only for verbose
+int verbose_basic = false;
+int verbose_stats = false;
+int verbose_hub = false;
+int verbose_device = false;
+int verbose_discard = false;
+raw_hid_message_counter_t* message_counters = NULL;
+uint64_t iters_since_last_stats = 0;
 
 // ============================================================================
 // TIME
@@ -230,7 +246,7 @@ void print_buffer(void) {
 }
 
 // ============================================================================
-// raw_hid_node_t MEMORY MANAGEMENT
+// raw_hid_node_t MEMORY MANAGEMENT (child only)
 // ============================================================================
 
 raw_hid_node_t* raw_hid_node_new(hid_device* device, const char* path) {
@@ -245,9 +261,8 @@ raw_hid_node_t* raw_hid_node_new(hid_device* device, const char* path) {
         return NULL;
     }
     new_node->device_id = DEVICE_ID_UNASSIGNED;
-    new_node->is_in_enumeration = false;
-    new_node->next = raw_hid_nodes;
-    raw_hid_nodes = new_node;
+    new_node->is_in_enumeration = true;
+    atomic_store(&(new_node->next), atomic_exchange(&raw_hid_nodes, new_node));
     return new_node;
 }
 
@@ -261,18 +276,119 @@ void raw_hid_node_free(raw_hid_node_t* node) {
 }
 
 void raw_hid_node_free_all(void) {
-    raw_hid_node_t* current_node = raw_hid_nodes;
+    raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
     raw_hid_node_t* next_node = NULL;
     while (current_node != NULL) {
-        next_node = current_node->next;
+        next_node = atomic_load(&current_node->next);
         raw_hid_node_free(current_node);
         current_node = next_node;
     }
-    raw_hid_nodes = NULL;
+    atomic_store(&raw_hid_nodes, NULL);
 }
 
 // ============================================================================
-// raw_hid_message_t MEMORY MANAGEMENT
+// HID ENUMERATION (child only)
+// ============================================================================
+
+int handle_raw_hid_device_found(const char* path) {
+    // returns 1 if a new device was opened, 0 if an existing open device was found, -1 for error
+    raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
+    while (current_node != NULL) {
+        if (strcmp(current_node->path, path) == 0) {
+            current_node->is_in_enumeration = true;
+            return 0;
+        }
+        current_node = atomic_load(&(current_node->next));
+    }
+    hid_device* device = hid_open_path(path);
+    if (device == NULL) {
+        return -1;
+    }
+    hid_set_nonblocking(device, 1);  // set hid_read() to be nonblocking
+    raw_hid_node_t* new_node = raw_hid_node_new(device, path);
+    if (new_node == NULL) {
+        hid_close(device);
+        return -1;
+    }
+    return 1;
+}
+
+int handle_raw_hid_device_missing(const char* path) {
+    // returns 1 if the node was freed, 0 if the node was marked for unregistration, -1 for error
+    raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
+    raw_hid_node_t* previous_node = NULL;
+    while (current_node != NULL) {
+        if (strcmp(current_node->path, path) == 0) {
+            if (atomic_load(&(current_node->is_marked_for_deletion)) == true) {
+                if (previous_node != NULL) {
+                    atomic_store(&(previous_node->next), atomic_load(&(current_node->next)));
+                } else {
+                    atomic_store(&raw_hid_nodes, atomic_load(&(current_node->next)));
+                }
+                atomic_store(&main_loop_new_iteration_flag, false);
+                // wait until we're certain the main process isn't on this node
+                while (atomic_load(&main_loop_new_iteration_flag) == false) {
+#ifdef _WIN32
+                    Sleep(SLEEP_MILLISECONDS_WINDOWS);
+#else
+                    usleep(SLEEP_MICROSECONDS_POSIX);
+#endif
+                }
+                raw_hid_node_free(current_node);
+                return 1;
+            } else if (atomic_load(&(current_node->is_marked_for_unregistration)) == false) {
+                atomic_store(&(current_node->is_marked_for_unregistration), true);
+                return 0;
+            }
+        }
+        previous_node = current_node;
+        current_node = atomic_load(&(current_node->next));
+    }
+    return -1;
+}
+
+void enumerate_raw_hid_devices(void) {
+
+    // unmark existing open devices
+    raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
+    while (current_node != NULL) {
+        if (atomic_load(&(current_node->is_marked_for_unregistration)) == false)  {
+            current_node->is_in_enumeration = false;
+        }
+        current_node = atomic_load(&(current_node->next));
+    }
+    
+    // open any newly found devices
+    struct hid_device_info* hid_enumeration_start = hid_enumerate(0x0, 0x0);
+    struct hid_device_info* current_device_info = hid_enumeration_start;
+    int result = 0;
+    while (current_device_info != NULL) {
+        if (current_device_info->usage_page == QMK_RAW_HID_USAGE_PAGE && current_device_info->usage == QMK_RAW_HID_USAGE) {
+            result = handle_raw_hid_device_found(current_device_info->path);	
+            if (verbose_basic == true && result == 1) {
+                printf("Opened a new raw HID device:\n");
+                print_device_info(current_device_info);
+            }
+        }
+        current_device_info = current_device_info->next;
+    }
+    hid_free_enumeration(hid_enumeration_start);
+
+    // close devices that weren't found in the enumeration
+    current_node = atomic_load(&raw_hid_nodes);
+    while (current_node != NULL) {
+        if (current_node->is_in_enumeration == false) {
+            result = handle_raw_hid_device_missing(current_node->path);
+            if (verbose_basic == true && result == 1) {
+                printf("Closed a missing raw HID device.\n");
+            }
+        }
+        current_node = atomic_load(&(current_node->next));
+    }
+}
+
+// ============================================================================
+// raw_hid_message_t MEMORY MANAGEMENT (parent only)
 // ============================================================================
 
 void message_queue_push(int device_id, const unsigned char* data) {
@@ -330,7 +446,7 @@ void message_queue_clear_all(void) {
 }
 
 // ============================================================================
-// DEVICE REGISTRATION/UNREGISTRATION
+// DEVICE REGISTRATION/UNREGISTRATION (parent only)
 // ============================================================================
 
 int register_node(raw_hid_node_t* node) {
@@ -378,92 +494,7 @@ void unregister_node(raw_hid_node_t* node) {
 }
 
 // ============================================================================
-// HID ENUMERATION
-// ============================================================================
-
-int handle_raw_hid_device_found(const char* path) {
-    // returns 1 if a new device was opened, 0 if an existing open device was found, -1 for error
-    raw_hid_node_t* current_node = raw_hid_nodes;
-    while (current_node != NULL) {
-        if (strcmp(current_node->path, path) == 0) {
-            current_node->is_in_enumeration = true;
-            return 0;
-        }
-        current_node = current_node->next;
-    }
-    hid_device* device = hid_open_path(path);
-    if (device == NULL) {
-        return -1;
-    }
-    hid_set_nonblocking(device, 1);  // set hid_read() to be nonblocking
-    raw_hid_node_t* new_node = raw_hid_node_new(device, path);
-    if (new_node == NULL) {
-        hid_close(device);
-        return -1;
-    }
-    new_node->is_in_enumeration = true;
-    return 1;
-}
-
-void handle_raw_hid_device_missing(const char* path) {
-    raw_hid_node_t* current_node = raw_hid_nodes;
-    raw_hid_node_t* previous_node = NULL;
-    while (current_node != NULL) {
-        if (strcmp(current_node->path, path) == 0) {
-            if (previous_node != NULL) {
-                previous_node->next = current_node->next;
-            } else {
-                raw_hid_nodes = current_node->next;
-            }
-            unregister_node(current_node);
-            raw_hid_node_free(current_node);
-            return;
-        }
-        previous_node = current_node;
-        current_node = current_node->next;
-    }
-}
-
-void enumerate_raw_hid_devices(void) {
-
-    // unmark existing open devices
-    raw_hid_node_t* current_node = raw_hid_nodes;
-    while (current_node != NULL) {
-        current_node->is_in_enumeration = false;
-        current_node = current_node->next;
-    }
-    
-    // open any newly found devices
-    struct hid_device_info* hid_enumeration_start = hid_enumerate(0x0, 0x0);
-    struct hid_device_info* current_device_info = hid_enumeration_start;
-    int result = 0;
-    while (current_device_info != NULL) {
-        if (current_device_info->usage_page == QMK_RAW_HID_USAGE_PAGE && current_device_info->usage == QMK_RAW_HID_USAGE) {
-            result = handle_raw_hid_device_found(current_device_info->path);	
-            if (verbose_basic == true && result == 1) {
-                printf("Opened a new raw HID device:\n");
-                print_device_info(current_device_info);
-            }
-        }
-        current_device_info = current_device_info->next;
-    }
-    hid_free_enumeration(hid_enumeration_start);
-
-    // close devices that weren't found in the enumeration
-    current_node = raw_hid_nodes;
-    while (current_node != NULL) {
-        if (current_node->is_in_enumeration == false) {
-            handle_raw_hid_device_missing(current_node->path);
-            if (verbose_basic == true) {
-                printf("Closed a missing raw HID device.\n");
-            }
-        }
-        current_node = current_node->next;
-    }
-}
-
-// ============================================================================
-// ACTUAL COMMUNICATION
+// ACTUAL COMMUNICATION (parent only)
 // ============================================================================
 
 void communicate_with_raw_hid_device(raw_hid_node_t* node) {
@@ -588,25 +619,94 @@ next_hid_read:
     }
 }
 
+void iterate_over_raw_hid_devices(void) {
+    raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
+    while (current_node != NULL) {
+        if (atomic_load((&(current_node->is_marked_for_unregistration))) == true) {
+            unregister_node(current_node);
+            atomic_store((&(current_node->is_marked_for_deletion)), true);
+        } else {
+            communicate_with_raw_hid_device(current_node);
+        }
+        current_node = atomic_load(&(current_node->next));
+    }
+    atomic_store(&main_loop_new_iteration_flag, true);
+}
+
 void send_hub_shutdown_reports(void) {
     buffer_data[0] = RAW_HID_HUB_COMMAND_ID;
     buffer_data[1] = DEVICE_ID_HUB;
     buffer_data[2] = DEVICE_ID_UNASSIGNED;
-    raw_hid_node_t* current_node = raw_hid_nodes;
+    raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
     while (current_node != NULL) {
         if (DEVICE_ID_IS_VALID(current_node->device_id)) {
             hid_write(current_node->device, buffer_report_id_and_data, QMK_RAW_HID_REPORT_SIZE + 1);
         }
-        current_node = current_node->next;
+        current_node = atomic_load(&(current_node->next));
     }
 }
 
 // ============================================================================
-// MAIN
+// CHILD PROCESS FOR ENUMERATION
+// ============================================================================
+
+#ifdef _WIN32
+HANDLE hChildProcess = NULL;
+#else
+pid_t child_pid = -1;
+#endif
+
+void child_process() {
+    while (atomic_load(&child_termination_flag) == false) {
+        enumerate_raw_hid_devices();
+#ifdef _WIN32
+        Sleep(SECONDS_PER_ENUMERATION * 1000);
+#else
+        usleep(SECONDS_PER_ENUMERATION * 1000000);
+#endif
+    }
+}
+
+void start_child() {
+#ifdef _WIN32
+    hChildProcess = (HANDLE)_beginthread((void (*)(void *))child_process, 0, NULL);
+    if (hChildProcess == NULL) {
+        exit(1);
+    }
+#else
+    child_pid = fork();
+    if (child_pid < 0) {
+        exit(1);
+    } else if (child_pid == 0) {
+        child_process();
+        exit(0);
+    }
+#endif
+}
+
+void stop_child() {
+    atomic_store(&main_loop_new_iteration_flag, true);
+    atomic_store(&child_termination_flag, true);
+#ifdef _WIN32
+    if (hChildProcess != NULL) {
+        WaitForSingleObject(hChildProcess, INFINITE);
+        CloseHandle(hChildProcess);
+        hChildProcess = NULL;
+    }
+#else
+    if (child_pid > 0) {
+        waitpid(child_pid, NULL, 0);
+    }
+#endif
+}
+
+// ============================================================================
+// CLEANUP ON EXIT
 // ============================================================================
 
 void cleanup() {
     send_hub_shutdown_reports();
+    stop_child();
     raw_hid_node_free_all();
     message_queue_clear_all();
     message_counter_free_all();
@@ -621,8 +721,11 @@ void signal_handler(int signal) {
     exit(signal);
 }
 
-int main(int argc, char* argv[])
-{
+// ============================================================================
+// MAIN
+// ============================================================================
+
+void parse_verbose(int argc, char* argv[]) {
     // crude parser for verbose argument
     uint8_t verbose = 0;
     if (argc > 1 && strncmp(argv[1], "-v", 2) == 0) {
@@ -655,11 +758,35 @@ int main(int argc, char* argv[])
             printf("  Printing discarded reports.\n");
         }
     }
+}
 
-    // register signal handler for termination signals
-    signal(SIGINT, signal_handler);   // Handles Ctrl+C
-    signal(SIGTERM, signal_handler);  // Handles termination request
-    signal(SIGABRT, signal_handler);  // Handles abort signals
+void main_sleep(void) {
+#if defined(USE_SLEEP_WINDOWS) && defined(_WIN32)
+#    ifdef USE_SMART_SLEEP_WINDOWS
+        if (last_message_time_ms - current_time_ms > SMART_SLEEP_WAIT_MILLISECONDS_WINDOWS) {
+            Sleep(SLEEP_MILLISECONDS_WINDOWS);
+        }
+#    else
+        Sleep(SLEEP_MILLISECONDS_WINDOWS);
+#    endif
+#elif defined(USE_SLEEP_POSIX) && !defined(_WIN32)
+#    ifdef USE_SMART_SLEEP_POSIX
+        if (last_message_time_ms - current_time_ms > SMART_SLEEP_WAIT_MILLISECONDS_POSIX) {
+            usleep(SLEEP_MICROSECONDS_POSIX);
+        }
+#    else
+        usleep(SLEEP_MICROSECONDS_POSIX);
+#    endif
+#endif
+}
+
+int main(int argc, char* argv[])
+{
+    parse_verbose(argc, argv);
+
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    signal(SIGABRT, signal_handler);
 
     // initialize hidapi
     int result = hid_init();
@@ -678,14 +805,15 @@ int main(int argc, char* argv[])
     memset(device_id_is_assigned, false, sizeof(device_id_is_assigned));
     memset(assigned_device_ids, DEVICE_ID_UNASSIGNED, sizeof(assigned_device_ids));
     memset(buffer_report_id_and_data, 0, sizeof(buffer_report_id_and_data));
+    memset(device_id_message_queue, 0, sizeof(device_id_message_queue));
     buffer_report_id_and_data[0] = QMK_RAW_HID_REPORT_ID;
     buffer_data = buffer_report_id_and_data + 1;
     update_current_time_ms();
     last_stats_time_ms = current_time_ms;
     last_message_time_ms = current_time_ms;
 
-    // enumerate once on startup (TODO: perform periodic enumerations in another thread)
-    enumerate_raw_hid_devices();
+    // start a child thread to run periodic enumerations
+    start_child();
 
     // main loop
     while (true) {
@@ -694,34 +822,13 @@ int main(int argc, char* argv[])
         update_current_time_ms();
 
         // actual hid task
-        raw_hid_node_t* current_node = raw_hid_nodes;
-        while (current_node != NULL) {
-            communicate_with_raw_hid_device(current_node);
-            current_node = current_node->next;
-        }
+        iterate_over_raw_hid_devices();
 
         // print stats
         maybe_print_and_update_stats();
 
         // sleep to reduce resource usage
-#if defined(USE_SLEEP_WINDOWS) && defined(_WIN32)
-#    ifdef USE_SMART_SLEEP_WINDOWS
-        if (last_message_time_ms - current_time_ms > SMART_SLEEP_WAIT_MILLISECONDS_WINDOWS) {
-            Sleep(SLEEP_MILLISECONDS_WINDOWS);
-        }
-#    else
-        Sleep(SLEEP_MILLISECONDS_WINDOWS);
-#    endif
-#elif defined(USE_SLEEP_POSIX) && !defined(_WIN32)
-#    ifdef USE_SMART_SLEEP_POSIX
-        if (last_message_time_ms - current_time_ms > SMART_SLEEP_WAIT_MILLISECONDS_WINDOWS) {
-            usleep(SLEEP_MICROSECONDS_POSIX);
-        }
-#    else
-        usleep(SLEEP_MICROSECONDS_POSIX);
-#    endif
-#endif
-
+        main_sleep();
     }
     
     // cleanup

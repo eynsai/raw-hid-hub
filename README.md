@@ -2,14 +2,41 @@
 
 This C script runs on your computer, acting as a switchboard that passes raw HID messages from one QMK-enabled device to another.
 
-## Building the software
+## Building the Program
 
-This program should work on Windows, Linux, and MacOS.
-[HIDAPI](https://github.com/libusb/hidapi) is required for compilation.
+This program should work on Windows, Linux, and MacOS, although it has not been tested on MacOS.
+[HIDAPI](https://github.com/libusb/hidapi) and C11 are required.
 
-To compile with Windows Powershell, download the latest compiled release of HIDAPI binaries and place the files in `raw-hid-hub/hidapi`. Then run `cl raw_hid_hub.c -O2 /I"." /link "./hidapi.lib"`.
+### Building on Windows
 
-To compile on Linux, install HIDAPI first. Then run `gcc -o raw-hid-hub raw-hid-hub.c -lhidapi-hidraw`.
+1. Install [MSYS2](https://.www.msys2.org/).
+2. Open a MINGW64 terminal.
+3. `pacman -Syu` (twice!)
+4. `pacman -S mingw-w64-x86_64-gcc`
+5. `pacman -S mingw-w64-x86_64-hidapi`
+6. `gcc [-static] -std=c11 -o raw_hid_hub.exe raw_hid_hub.c -O3 -lhidapi`
+
+### Building on Linux
+
+1. Open a terminal.
+2. `sudo apt update`
+3. `sudo apt install build-essential`
+4. `sudo apt install libhidapi-dev` 
+5. `gcc [-static] -std=c11 -o raw-hid-hub raw-hid-hub.c -O3 -lhidapi-hidraw`.
+
+### Flags
+
+| Flag                              | Description                                                                                       |
+| --------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `STATS_INTERVAL_MS`               | How often to print stats when using `-v2`.                                                        |
+| `QMK_RAW_HID_USAGE_PAGE`          | HID usage page for raw HID. You probably don't need to change this.                               |
+| `QMK_RAW_HID_USAGE`               | HID usage for raw HID. You probably don't need to change this.                                    |
+| `RAW_HID_HUB_COMMAND_ID`          | Command ID to identify messages that are intended for the hub. Change this if necessary.          |
+| `USE_SLEEP_*`                     | If this is defined, the program sleeps after each iteration over HID devices, reducing CPU usage. |
+| `USE_SMART_SLEEP_*`               | If this is defined, the program waits for a bit after the last message report before sleeping.    |
+| `SLEEP_*SECONDS_*`                | Controls how long to sleep for when `USE_SLEEP_*` is defined.                                     |
+| `SMART_SLEEP_WAIT_MILLISECONDS_*` | Controls how long to stop sleeping for when `USE_SMART_SLEEP_*` is defined.                       |
+| `SECONDS_PER_ENUMERATION`         | Controls how much time passes between HID device enumerations.                                    |
 
 ## Verbosity
 
@@ -26,8 +53,11 @@ These options can be combined by adding the respective numbers together. For exa
 
 ## Reports
 
+Use QMK's [Raw HID](https://docs.qmk.fm/features/rawhid) feature to send and receive reports.
+If you're using VIA or VIAL, you may need to look into how these frameworks handle Raw HID.
+
 #### Registration Report (device -> hub):
-The hub never sends raw HID to any device that hasn't "registered".
+The hub never sends raw HID to any device that isn't "registered".
 Devices can register by sending a registration report to the hub.
 After a device initially sends a registration report, if the registration was successful, the hub will send a status report to all currently registered devices, including the newly registered device.
 If an already-registered device sends another registration report, the hub will send a status report to only the device that sent the registration report. This allows registration reports to double as an "are you there" ping.
