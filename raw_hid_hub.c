@@ -249,7 +249,7 @@ void print_buffer(void) {
 // raw_hid_node_t MEMORY MANAGEMENT (child only)
 // ============================================================================
 
-raw_hid_node_t* raw_hid_node_new(hid_device* device, const char* path) {
+raw_hid_node_t* raw_hid_node_new(hid_device* device, const char* path, raw_hid_node_t* previous_node) {
     raw_hid_node_t* new_node = (raw_hid_node_t*)malloc(sizeof(raw_hid_node_t));
     if (new_node == NULL) {
         return NULL;
@@ -262,7 +262,14 @@ raw_hid_node_t* raw_hid_node_new(hid_device* device, const char* path) {
     }
     new_node->device_id = DEVICE_ID_UNASSIGNED;
     new_node->is_in_enumeration = true;
-    atomic_store(&(new_node->next), atomic_exchange(&raw_hid_nodes, new_node));
+    atomic_store(&(new_node->is_marked_for_unregistration), false);
+    atomic_store(&(new_node->is_marked_for_deletion), false);
+    atomic_store(&(new_node->next), NULL);
+    if (previous_node == NULL) {
+        atomic_store(&raw_hid_nodes, new_node);
+    } else {
+        atomic_store(&(previous_node->next), new_node);
+    }
     return new_node;
 }
 
@@ -293,11 +300,13 @@ void raw_hid_node_free_all(void) {
 int handle_raw_hid_device_found(const char* path) {
     // returns 1 if a new device was opened, 0 if an existing open device was found, -1 for error
     raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
+    raw_hid_node_t* previous_node = NULL;
     while (current_node != NULL) {
-        if (strcmp(current_node->path, path) == 0) {
+        if ((strcmp(current_node->path, path) == 0) && (!atomic_load(&(current_node->is_marked_for_unregistration)))) {
             current_node->is_in_enumeration = true;
             return 0;
         }
+        previous_node = current_node;
         current_node = atomic_load(&(current_node->next));
     }
     hid_device* device = hid_open_path(path);
@@ -305,7 +314,7 @@ int handle_raw_hid_device_found(const char* path) {
         return -1;
     }
     hid_set_nonblocking(device, 1);  // set hid_read() to be nonblocking
-    raw_hid_node_t* new_node = raw_hid_node_new(device, path);
+    raw_hid_node_t* new_node = raw_hid_node_new(device, path, previous_node);
     if (new_node == NULL) {
         hid_close(device);
         return -1;
@@ -313,38 +322,29 @@ int handle_raw_hid_device_found(const char* path) {
     return 1;
 }
 
-int handle_raw_hid_device_missing(const char* path) {
+int handle_raw_hid_device_missing(raw_hid_node_t* previous_node, raw_hid_node_t* current_node) {
     // returns 1 if the node was freed, 0 if the node was marked for unregistration, -1 for error
-    raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
-    raw_hid_node_t* previous_node = NULL;
-    while (current_node != NULL) {
-        if (strcmp(current_node->path, path) == 0) {
-            if (atomic_load(&(current_node->is_marked_for_deletion)) == true) {
-                if (previous_node != NULL) {
-                    atomic_store(&(previous_node->next), atomic_load(&(current_node->next)));
-                } else {
-                    atomic_store(&raw_hid_nodes, atomic_load(&(current_node->next)));
-                }
-                atomic_store(&main_loop_new_iteration_flag, false);
-                // wait until we're certain the main process isn't on this node
-                while (atomic_load(&main_loop_new_iteration_flag) == false) {
-#ifdef _WIN32
-                    Sleep(SLEEP_MILLISECONDS_WINDOWS);
-#else
-                    usleep(SLEEP_MICROSECONDS_POSIX);
-#endif
-                }
-                raw_hid_node_free(current_node);
-                return 1;
-            } else if (atomic_load(&(current_node->is_marked_for_unregistration)) == false) {
-                atomic_store(&(current_node->is_marked_for_unregistration), true);
-                return 0;
-            }
+    if (atomic_load(&(current_node->is_marked_for_deletion)) == true) {
+        if (previous_node != NULL) {
+            atomic_store(&(previous_node->next), atomic_load(&(current_node->next)));
+        } else {
+            atomic_store(&raw_hid_nodes, atomic_load(&(current_node->next)));
         }
-        previous_node = current_node;
-        current_node = atomic_load(&(current_node->next));
+        atomic_store(&main_loop_new_iteration_flag, false);
+        // wait until we're certain the main process isn't on this node
+        while (atomic_load(&main_loop_new_iteration_flag) == false) {
+#ifdef _WIN32
+            Sleep(SLEEP_MILLISECONDS_WINDOWS);
+#else
+            usleep(SLEEP_MICROSECONDS_POSIX);
+#endif
+        }
+        raw_hid_node_free(current_node);
+        return 1;
+    } else {
+        atomic_store(&(current_node->is_marked_for_unregistration), true);
+        return 0;
     }
-    return -1;
 }
 
 void enumerate_raw_hid_devices(void) {
@@ -352,9 +352,7 @@ void enumerate_raw_hid_devices(void) {
     // unmark existing open devices
     raw_hid_node_t* current_node = atomic_load(&raw_hid_nodes);
     while (current_node != NULL) {
-        if (atomic_load(&(current_node->is_marked_for_unregistration)) == false)  {
-            current_node->is_in_enumeration = false;
-        }
+        current_node->is_in_enumeration = false;
         current_node = atomic_load(&(current_node->next));
     }
     
@@ -364,7 +362,7 @@ void enumerate_raw_hid_devices(void) {
     int result = 0;
     while (current_device_info != NULL) {
         if (current_device_info->usage_page == QMK_RAW_HID_USAGE_PAGE && current_device_info->usage == QMK_RAW_HID_USAGE) {
-            result = handle_raw_hid_device_found(current_device_info->path);	
+            result = handle_raw_hid_device_found(current_device_info->path);
             if (verbose_basic == true && result == 1) {
                 printf("Opened a new raw HID device:\n");
                 print_device_info(current_device_info);
@@ -376,13 +374,15 @@ void enumerate_raw_hid_devices(void) {
 
     // close devices that weren't found in the enumeration
     current_node = atomic_load(&raw_hid_nodes);
+    raw_hid_node_t* previous_node = NULL;
     while (current_node != NULL) {
         if (current_node->is_in_enumeration == false) {
-            result = handle_raw_hid_device_missing(current_node->path);
+            result = handle_raw_hid_device_missing(previous_node, current_node);
             if (verbose_basic == true && result == 1) {
                 printf("Closed a missing raw HID device.\n");
             }
         }
+        previous_node = current_node;
         current_node = atomic_load(&(current_node->next));
     }
 }
