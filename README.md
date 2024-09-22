@@ -14,7 +14,7 @@ This program should work on Windows, Linux, and MacOS, although it has not been 
 3. `pacman -Syu` (twice!)
 4. `pacman -S mingw-w64-x86_64-gcc`
 5. `pacman -S mingw-w64-x86_64-hidapi`
-6. `gcc [-static] -std=c11 -o raw_hid_hub.exe raw_hid_hub.c -O3 -lhidapi`
+6. `gcc -static -std=c11 -o raw_hid_hub.exe raw_hid_hub.c -O3 -lhidapi`
 
 ### Building on Linux
 
@@ -22,7 +22,7 @@ This program should work on Windows, Linux, and MacOS, although it has not been 
 2. `sudo apt update`
 3. `sudo apt install build-essential`
 4. `sudo apt install libhidapi-dev` 
-5. `gcc [-static] -std=c11 -o raw-hid-hub raw-hid-hub.c -O3 -lhidapi-hidraw`.
+5. `gcc -std=c11 -o raw_hid_hub raw_hid_hub.c -O3 -lhidapi-hidraw`.
 
 ### Flags
 
@@ -34,7 +34,7 @@ This program should work on Windows, Linux, and MacOS, although it has not been 
 | `RAW_HID_HUB_COMMAND_ID`          | Command ID to identify messages that are intended for the hub. Change this if necessary.          |
 | `USE_SLEEP_*`                     | If this is defined, the program sleeps after each iteration over HID devices, reducing CPU usage. |
 | `USE_SMART_SLEEP_*`               | If this is defined, the program waits for a bit after the last message report before sleeping.    |
-| `SLEEP_*SECONDS_*`                | Controls how long to sleep for when `USE_SLEEP_*` is defined.                                     |
+| `SLEEP_MILLISECONDS_*`            | Controls how long to sleep for when `USE_SLEEP_*` is defined.                                     |
 | `SMART_SLEEP_WAIT_MILLISECONDS_*` | Controls how long to stop sleeping for when `USE_SMART_SLEEP_*` is defined.                       |
 | `SECONDS_PER_ENUMERATION`         | Controls how much time passes between HID device enumerations.                                    |
 

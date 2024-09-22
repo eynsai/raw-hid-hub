@@ -2,11 +2,16 @@
 // INCLUDES
 // ============================================================================
 
+#ifndef _WIN32
+#    define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <signal.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
@@ -14,6 +19,7 @@
 #    include <process.h>
 #    include <windows.h>
 #else
+#    include <errno.h>
 #    include <fcntl.h>
 #    include <semaphore.h>
 #    include <sys/types.h>
@@ -43,7 +49,7 @@
 #define SMART_SLEEP_WAIT_MILLISECONDS_WINDOWS 100
 #define USE_SLEEP_POSIX
 #define USE_SMART_SLEEP_POSIX
-#define SLEEP_MICROSECONDS_POSIX 4167
+#define SLEEP_MILLISECONDS_POSIX 4.16666667
 #define SMART_SLEEP_WAIT_MILLISECONDS_POSIX 100
 
 // control speed of the child loop
@@ -160,6 +166,18 @@ void update_current_time_ms() {
     current_time_ms = (uint64_t)(ts.tv_sec) * 1000 + (uint64_t)(ts.tv_nsec) / 1000000;
 #endif
 }
+
+#ifndef _WIN32
+void sleep_milliseconds(float milliseconds) {
+    struct timespec req = {0};
+    struct timespec rem = {0};
+    req.tv_sec = (time_t)(milliseconds / 1000);
+    req.tv_nsec = (long)((milliseconds - (req.tv_sec * 1000)) * 1e6);
+    while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
+        req = rem;
+    }
+}
+#endif
 
 // ============================================================================
 // VERBOSE UTILITIES
@@ -334,7 +352,7 @@ int handle_raw_hid_device_missing(raw_hid_node_t* previous_node, raw_hid_node_t*
 #ifdef _WIN32
             Sleep(SLEEP_MILLISECONDS_WINDOWS);
 #else
-            usleep(SLEEP_MICROSECONDS_POSIX);
+            sleep_milliseconds(SLEEP_MILLISECONDS_POSIX);
 #endif
         }
         raw_hid_node_free(current_node);
@@ -652,7 +670,7 @@ void child_process() {
 #ifdef _WIN32
         Sleep(SECONDS_PER_ENUMERATION * 1000);
 #else
-        usleep(SECONDS_PER_ENUMERATION * 1000000);
+        sleep_milliseconds(SECONDS_PER_ENUMERATION * 1000);
 #endif
     }
 }
@@ -762,10 +780,10 @@ void main_sleep(void) {
 #elif defined(USE_SLEEP_POSIX) && !defined(_WIN32)
 #    ifdef USE_SMART_SLEEP_POSIX
         if (last_message_time_ms - current_time_ms > SMART_SLEEP_WAIT_MILLISECONDS_POSIX) {
-            usleep(SLEEP_MICROSECONDS_POSIX);
+            sleep_milliseconds(SLEEP_MILLISECONDS_POSIX);
         }
 #    else
-        usleep(SLEEP_MICROSECONDS_POSIX);
+        sleep_milliseconds(SLEEP_MILLISECONDS_POSIX);
 #    endif
 #endif
 }
