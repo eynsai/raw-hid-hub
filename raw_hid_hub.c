@@ -21,6 +21,7 @@
 #else
 #    include <errno.h>
 #    include <fcntl.h>
+#    include <pthread.h>
 #    include <semaphore.h>
 #    include <sys/types.h>
 #    include <sys/wait.h>
@@ -157,7 +158,7 @@ uint64_t iters_since_last_stats = 0;
 // TIME
 // ============================================================================
 
-void update_current_time_ms() {
+void update_current_time_ms(void) {
 #ifdef _WIN32
     current_time_ms = (uint64_t)GetTickCount64();
 #else
@@ -661,38 +662,42 @@ void send_hub_shutdown_reports(void) {
 #ifdef _WIN32
 HANDLE hChildProcess = NULL;
 #else
-pid_t child_pid = -1;
+pthread_t child_thread;
 #endif
 
-void child_process() {
+#ifdef _WIN32
+void child_process(void) {
     while (!atomic_load(&child_termination_flag)) {
         enumerate_raw_hid_devices();
-#ifdef _WIN32
         Sleep(SECONDS_PER_ENUMERATION * 1000);
-#else
-        sleep_milliseconds(SECONDS_PER_ENUMERATION * 1000);
-#endif
     }
 }
+#else
+void* child_process(void* arg) {
+    while (!atomic_load(&child_termination_flag)) {
+        enumerate_raw_hid_devices();
+        sleep_milliseconds(SECONDS_PER_ENUMERATION * 1000);
+    }
+}
+#endif
 
-void start_child() {
+void start_child(void) {
 #ifdef _WIN32
     hChildProcess = (HANDLE)_beginthread((void (*)(void *))child_process, 0, NULL);
     if (hChildProcess == NULL) {
+        printf("Error creating parallel process/thread for enumeration.");
         exit(1);
     }
 #else
-    child_pid = fork();
-    if (child_pid < 0) {
+    int result = pthread_create(&child_thread, NULL, (void* (*)(void*))child_process, NULL);
+    if (result != 0) {
+        printf("Error creating parallel process/thread for enumeration.");
         exit(1);
-    } else if (child_pid == 0) {
-        child_process();
-        exit(0);
     }
 #endif
 }
 
-void stop_child() {
+void stop_child(void) {
     atomic_store(&main_loop_new_iteration_flag, true);
     atomic_store(&child_termination_flag, true);
 #ifdef _WIN32
@@ -702,9 +707,7 @@ void stop_child() {
         hChildProcess = NULL;
     }
 #else
-    if (child_pid > 0) {
-        waitpid(child_pid, NULL, 0);
-    }
+    pthread_join(child_thread, NULL);
 #endif
 }
 
@@ -712,7 +715,7 @@ void stop_child() {
 // CLEANUP ON EXIT
 // ============================================================================
 
-void cleanup() {
+void cleanup(void) {
     send_hub_shutdown_reports();
     stop_child();
     raw_hid_node_free_all();
