@@ -538,6 +538,8 @@ void communicate_with_raw_hid_device(raw_hid_node_t* node) {
                 if (result == 0) {
                     // registrations didn't change, so respond to only this device
                     destination_device_id = node->device_id;
+                    buffer_data[0] = RAW_HID_HUB_COMMAND_ID;
+                    buffer_data[1] = DEVICE_ID_HUB;
                     memcpy(buffer_data + 2, assigned_device_ids, MAX_REGISTERED_DEVICES);
                     for (int j = 3; j < n_registered_devices + 2; j++) {
                         if (buffer_data[j] == destination_device_id) {
@@ -574,6 +576,7 @@ void communicate_with_raw_hid_device(raw_hid_node_t* node) {
                 if (!device_id_is_assigned[destination_device_id]) {
                     goto next_hid_read;
                 }
+                buffer_data[0] = RAW_HID_HUB_COMMAND_ID;
                 buffer_data[1] = node->device_id;
                 message_queue_push(destination_device_id, buffer_data);
                 if (verbose_stats) {
@@ -595,6 +598,8 @@ next_hid_read:
     if (registrations_changed) {
         for (int i = 0; i < n_registered_devices; i++) {
             destination_device_id = assigned_device_ids[i];
+            buffer_data[0] = RAW_HID_HUB_COMMAND_ID;
+            buffer_data[1] = DEVICE_ID_HUB;
             memcpy(buffer_data + 2, assigned_device_ids, MAX_REGISTERED_DEVICES);
             for (int j = 3; j < n_registered_devices + 2; j++) {
                 if (buffer_data[j] == destination_device_id) {
