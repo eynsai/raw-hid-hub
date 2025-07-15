@@ -7,14 +7,19 @@ This C script runs on your computer, acting as a switchboard that passes raw HID
 This program should work on Windows, Linux, and MacOS, although it has not been tested on MacOS.
 [HIDAPI](https://github.com/libusb/hidapi) and C11 are required.
 
-### Building on Windows
+### Building and Installing on Windows
+
+To build:
 
 1. Install [MSYS2](https://.www.msys2.org/).
 2. Open a MINGW64 terminal.
 3. `pacman -Syu` (twice!)
 4. `pacman -S mingw-w64-x86_64-gcc`
 5. `pacman -S mingw-w64-x86_64-hidapi`
-6. `gcc -static -std=c11 -o raw_hid_hub.exe raw_hid_hub.c -O3 -lhidapi`
+6. `gcc -static -std=c11 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -fPIE -pie -Wl,-z,relro,-z,now -o raw_hid_hub.exe raw_hid_hub.c -O3 -lhidapi`
+
+To install, set `raw_hid_hub.exe` to run automatically however you prefer.
+I am unsure about the security consequences of this.
 
 ### Building on Linux
 
@@ -22,7 +27,47 @@ This program should work on Windows, Linux, and MacOS, although it has not been 
 2. `sudo apt update`
 3. `sudo apt install build-essential`
 4. `sudo apt install libhidapi-dev` 
-5. `gcc -std=c11 -o raw_hid_hub raw_hid_hub.c -O3 -lhidapi-hidraw`.
+5. `gcc -std=c11 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security -fPIE -pie -Wl,-z,relro,-z,now -o raw-hid-hub raw_hid_hub.c -O3 -lhidapi-hidraw`
+
+To install, we will create a service user with HID access to run the program.
+
+1. `sudo mv raw-hid-hub /usr/local/bin`
+2. `sudo useradd --system --no-create-home --shell /usr/sbin/nologin raw-hid-hub`
+3. `sudo chown root:raw-hid-hub /usr/local/bin/raw-hid-hub && sudo chmod 750 /usr/local/bin/raw-hid-hub`
+4. `sudo groupadd hidaccess`
+5. `sudo usermod -aG hidaccess raw-hid-hub`
+6. `sudo vim /etc/udev/rules.d/99-hidraw-all.rules` and insert: `KERNEL=="hidraw*", MODE="0660", GROUP="hidaccess"`
+7. `sudo udevadm control --reload-rules && sudo udevadm trigger`
+8. `sudo vim /etc/systemd/system/raw-hid-hub.service` and insert:
+
+```
+[Unit]
+Description=Raw HID Hub
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/raw-hid-hub
+Restart=on-failure
+User=raw-hid-hub
+Group=raw-hid-hub
+ProtectSystem=full
+ProtectHome=yes
+NoNewPrivileges=true
+PrivateTmp=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
+```
+
+9. `sudo systemctl daemon-reload`
+10. `sudo systemctl enable raw-hid-hub.service`
+11. `sudo systemctl start raw-hid-hub.service`
+
+### Building on MacOS
+
+Not sure how. Sorry.
 
 ### Flags
 
