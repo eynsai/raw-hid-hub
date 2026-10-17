@@ -500,8 +500,8 @@ void unregister_node(raw_hid_node_t* node) {
             break;
         }
     }
-    node->device_id = DEVICE_ID_UNASSIGNED;
     device_id_is_assigned[node->device_id] = false;
+    node->device_id = DEVICE_ID_UNASSIGNED;
     n_registered_devices -= 1;
     registrations_changed = true;
 }
